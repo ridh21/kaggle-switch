@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# kgs - manage multiple Kaggle API accounts and switch between them.
+# Works with the stock bash 3.2 that ships with macOS.
+
+set -euo pipefail
+
+KGS_VERSION="0.1.0"
+KGS_HOME="${KGS_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/kaggle-accounts}"
+CURRENT_FILE="$KGS_HOME/.current"
+
+die() { printf 'kgs: %s\n' "$*" >&2; exit 1; }
+info() { printf '%s\n' "$*" >&2; }
+
+usage() {
+  cat <<'EOF'
+kgs - manage multiple Kaggle API accounts
+
+Usage:
+  kgs add <name> [--file <kaggle.json>] [--token]   Save an account
+  kgs list                                          List saved accounts
+  kgs use <name>                                    Switch this shell to an account
+  kgs run <name> [--] <command...>                  Run one command as an account
+  kgs current                                       Print the active account
+  kgs remove <name> [-y]                            Delete a saved account
+  kgs shell-init                                    Print the shell hook for .zshrc/.bashrc
+  kgs --version | --help
+
+Examples:
+  kgs add personal                       # prompts for username and API key
+  kgs add lab --file ~/Downloads/kaggle.json
+  kgs add work --token                   # prompts for a KGAT_... API token
+  kgs use lab && kaggle kernels list --mine
+  kgs run personal -- kaggle kernels push -p ./notebook
+
+Accounts live in ~/.config/kaggle-accounts/<name>/ (override with KGS_HOME).
+EOF
+}
+
+valid_name() {
+  case "$1" in
+    ""|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
+require_account() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "missing account name"
+  valid_name "$name" || die "invalid account name: $name"
+  [ -d "$KGS_HOME/$name" ] || die "no such account: $name (see 'kgs list')"
+}
+
+# Pull a string field out of a kaggle.json without needing jq.
+json_field() {
+  sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -n 1
+}
+
+current_account() {
+  # A switched shell wins over the saved default.
+  case "${KAGGLE_CONFIG_DIR:-}" in
+    "$KGS_HOME"/*)
+      local name="${KAGGLE_CONFIG_DIR#"$KGS_HOME"/}"
+      if [ -d "$KGS_HOME/$name" ]; then printf '%s\n' "$name"; return 0; fi
+      ;;
+  esac
+  if [ -f "$CURRENT_FILE" ]; then
+    local name
+    name="$(cat "$CURRENT_FILE")"
+    if [ -n "$name" ] && [ -d "$KGS_HOME/$name" ]; then printf '%s\n' "$name"; return 0; fi
+  fi
+  return 1
+}
+
+cmd_add() {
+  local name="" file="" token_mode=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --file|-f) [ $# -ge 2 ] || die "--file needs a path"; file="$2"; shift 2 ;;
+      --token|-t) token_mode=1; shift ;;
+      -*) die "unknown option: $1" ;;
+      *) [ -z "$name" ] || die "unexpected argument: $1"; name="$1"; shift ;;
+    esac
+  done
+  [ -n "$name" ] || die "usage: kgs add <name> [--file <kaggle.json>] [--token]"
+  valid_name "$name" || die "account names may only use letters, digits, '.', '_' and '-'"
+  [ -z "$file" ] || [ "$token_mode" -eq 0 ] || die "use either --file or --token, not both"
+
+  local dir="$KGS_HOME/$name"
+  if [ -d "$dir" ]; then
+    local reply=""
+    printf "Account '%s' already exists. Overwrite? [y/N] " "$name" >&2
+    read -r reply || true
+    case "$reply" in y|Y|yes|YES) ;; *) die "aborted" ;; esac
+  fi
+
+  umask 077
+  if [ -n "$file" ]; then
+    [ -f "$file" ] || die "file not found: $file"
+    [ -n "$(json_field "$file" username)" ] && [ -n "$(json_field "$file" key)" ] \
+      || die "$file does not look like a kaggle.json (needs \"username\" and \"key\")"
+    mkdir -p "$dir"
+    rm -f "$dir/access_token"
+    cp "$file" "$dir/kaggle.json"
+  elif [ "$token_mode" -eq 1 ]; then
+    local token=""
+    printf 'Kaggle API token (KGAT_...): ' >&2
+    read -rs token || true
+    printf '\n' >&2
+    [ -n "$token" ] || die "token cannot be empty"
+    mkdir -p "$dir"
+    rm -f "$dir/kaggle.json"
+    printf '%s\n' "$token" > "$dir/access_token"
+  else
+    local username="" key=""
+    printf 'Kaggle username: ' >&2
+    read -r username || true
+    printf 'Kaggle API key: ' >&2
+    read -rs key || true
+    printf '\n' >&2
+    [ -n "$username" ] && [ -n "$key" ] || die "username and key cannot be empty"
+    case "$username$key" in
+      *[\"\\]*) die "username and key cannot contain quotes or backslashes" ;;
+    esac
+    mkdir -p "$dir"
+    rm -f "$dir/access_token"
+    printf '{"username":"%s","key":"%s"}\n' "$username" "$key" > "$dir/kaggle.json"
+  fi
+  chmod 700 "$KGS_HOME" "$dir"
+  chmod 600 "$dir"/*
+
+  info "Saved account '$name'."
+  if ! current_account >/dev/null; then
+    printf '%s\n' "$name" > "$CURRENT_FILE"
+    info "Set '$name' as the default account."
+  fi
+}
+
+cmd_list() {
+  [ -d "$KGS_HOME" ] || { info "No accounts yet. Add one with: kgs add <name>"; return 0; }
+  local current="" found=0 dir name who mark
+  current="$(current_account || true)"
+  for dir in "$KGS_HOME"/*/; do
+    [ -d "$dir" ] || continue
+    found=1
+    name="$(basename "$dir")"
+    if [ -f "$dir/kaggle.json" ]; then
+      who="$(json_field "$dir/kaggle.json" username)"
+    elif [ -f "$dir/access_token" ]; then
+      who="(api token)"
+    else
+      who="(no credentials)"
+    fi
+    mark=" "
+    [ "$name" = "$current" ] && mark="*"
+    printf '%s %-20s %s\n' "$mark" "$name" "$who"
+  done
+  [ "$found" -eq 1 ] || info "No accounts yet. Add one with: kgs add <name>"
+}
+
+# Print the exports that point the kaggle CLI at an account. With no name it
+# uses the saved default and stays silent if there is none (used at shell start).
+cmd_env() {
+  local name="${1:-}"
+  if [ -z "$name" ]; then
+    name="$(current_account || true)"
+    [ -n "$name" ] || return 0
+  else
+    require_account "$name"
+    printf '%s\n' "$name" > "$CURRENT_FILE"
+  fi
+  local dir="$KGS_HOME/$name"
+  # KAGGLE_USERNAME/KAGGLE_KEY override kaggle.json, so clear them.
+  printf 'unset KAGGLE_USERNAME KAGGLE_KEY KAGGLE_API_TOKEN\n'
+  printf 'export KAGGLE_CONFIG_DIR=%q\n' "$dir"
+  if [ -f "$dir/access_token" ]; then
+    printf 'export KAGGLE_API_TOKEN=%q\n' "$(cat "$dir/access_token")"
+  fi
+}
+
+cmd_use() {
+  require_account "${1:-}"
+  printf '%s\n' "$1" > "$CURRENT_FILE"
+  info "Default account set to '$1', but this shell was not switched."
+  info "Add this to your ~/.zshrc (or ~/.bashrc) and open a new terminal:"
+  info '  eval "$(kgs shell-init)"'
+}
+
+cmd_run() {
+  local name="${1:-}"
+  require_account "$name"
+  shift
+  [ "${1:-}" = "--" ] && shift
+  [ $# -gt 0 ] || die "usage: kgs run <name> [--] <command...>"
+  local dir="$KGS_HOME/$name"
+  unset KAGGLE_USERNAME KAGGLE_KEY KAGGLE_API_TOKEN
+  export KAGGLE_CONFIG_DIR="$dir"
+  if [ -f "$dir/access_token" ]; then
+    KAGGLE_API_TOKEN="$(cat "$dir/access_token")"
+    export KAGGLE_API_TOKEN
+  fi
+  exec "$@"
+}
+
+cmd_current() {
+  current_account || die "no active account (see 'kgs list')"
+}
+
+cmd_remove() {
+  local name="" yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -y|--yes) yes=1; shift ;;
+      -*) die "unknown option: $1" ;;
+      *) [ -z "$name" ] || die "unexpected argument: $1"; name="$1"; shift ;;
+    esac
+  done
+  require_account "$name"
+  if [ "$yes" -eq 0 ]; then
+    local reply=""
+    printf "Delete account '%s' and its saved credentials? [y/N] " "$name" >&2
+    read -r reply || true
+    case "$reply" in y|Y|yes|YES) ;; *) die "aborted" ;; esac
+  fi
+  rm -rf "${KGS_HOME:?}/$name"
+  if [ -f "$CURRENT_FILE" ] && [ "$(cat "$CURRENT_FILE")" = "$name" ]; then
+    rm -f "$CURRENT_FILE"
+  fi
+  info "Removed account '$name'."
+}
+
+cmd_shell_init() {
+  cat <<'EOF'
+kgs() {
+  if [ "${1:-}" = "use" ] && [ -n "${2:-}" ]; then
+    local _kgs_env
+    _kgs_env="$(command kgs _env "$2")" || return $?
+    eval "$_kgs_env"
+    echo "Switched to Kaggle account '$2'." >&2
+  else
+    command kgs "$@"
+  fi
+}
+eval "$(command kgs _env 2>/dev/null)"
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+  [ $# -gt 0 ] && shift
+  case "$cmd" in
+    add) cmd_add "$@" ;;
+    list|ls) cmd_list ;;
+    use) cmd_use "$@" ;;
+    run) cmd_run "$@" ;;
+    current) cmd_current ;;
+    remove|rm) cmd_remove "$@" ;;
+    shell-init) cmd_shell_init ;;
+    _env) cmd_env "$@" ;;
+    -v|--version|version) printf 'kgs %s\n' "$KGS_VERSION" ;;
+    ""|-h|--help|help) usage ;;
+    *) die "unknown command: $cmd (try 'kgs --help')" ;;
+  esac
+}
+
+main "$@"
