@@ -10,8 +10,11 @@ Homebrew:
 
 ```bash
 brew tap ridh21/kaggle-switch https://github.com/ridh21/kaggle-switch
+brew trust ridh21/kaggle-switch
 brew install kaggle-switch
 ```
+
+Recent Homebrew versions refuse to load formulae from a third-party tap until you trust it. If your `brew` has no `trust` command, skip that line.
 
 Without Homebrew:
 
