@@ -1,8 +1,8 @@
 class KaggleSwitch < Formula
   desc "Manage multiple Kaggle API accounts and switch between them"
   homepage "https://github.com/ridh21/kaggle-switch"
-  url "https://github.com/ridh21/kaggle-switch/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "2381dd651cc57fc066d72f23a6f0b399e64ab0c74ecc1b2a7d795f3e3237ddc5"
+  url "https://github.com/ridh21/kaggle-switch/archive/refs/tags/v0.2.0.tar.gz"
+  sha256 "239939fde38a6416a1743daa685c28d9725a0ef17b11223d81752cf99dba64bd"
   license "MIT"
   head "https://github.com/ridh21/kaggle-switch.git", branch: "main"
 
