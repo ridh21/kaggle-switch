@@ -45,8 +45,12 @@ kaggle kernels list --mine                    # runs as "lab"
 
 kgs run personal -- kaggle kernels push -p ./notebook   # one command as "personal"
 kgs current
+kgs quota                                     # weekly GPU hours left on every account
+kgs quota lab personal                        # or just some of them
 kgs remove work
 ```
+
+`kgs quota` needs Kaggle CLI 2.2 or newer, because it relies on the `kaggle quota` command.
 
 `kgs run` only affects the command it launches, so you can run jobs as different accounts in separate terminals at the same time.
 
@@ -65,6 +69,8 @@ Each account is stored in its own directory:
 Directories are `700` and credential files are `600`. `kgs` points the Kaggle CLI at an account by setting `KAGGLE_CONFIG_DIR` (and `KAGGLE_API_TOKEN` for token accounts). It unsets `KAGGLE_USERNAME` and `KAGGLE_KEY`, because those would otherwise override the selected account.
 
 Your existing `~/.kaggle/kaggle.json` is never touched. To bring it in, run `kgs add <name> --file ~/.kaggle/kaggle.json`.
+
+If `~/.kaggle/access_token` exists, the Kaggle CLI uses it ahead of any `kaggle.json`, so accounts saved from a `kaggle.json` end up running as the token's owner. `kgs run` and `kgs use` print a warning when this happens. Move the file into `kgs` with `kgs add <name> --token < ~/.kaggle/access_token`, then delete the original. `kgs quota` gets around the problem on its own.
 
 Set `KGS_HOME` to store accounts somewhere else.
 

@@ -21,6 +21,7 @@ Usage:
   kgs use <name>                                    Switch this shell to an account
   kgs run <name> [--] <command...>                  Run one command as an account
   kgs current                                       Print the active account
+  kgs quota [name...]                               Show weekly GPU quota left per account
   kgs remove <name> [-y]                            Delete a saved account
   kgs shell-init                                    Print the shell hook for .zshrc/.bashrc
   kgs --version | --help
@@ -31,6 +32,7 @@ Examples:
   kgs add work --token                   # prompts for a KGAT_... API token
   kgs use lab && kaggle kernels list --mine
   kgs run personal -- kaggle kernels push -p ./notebook
+  kgs quota                              # GPU hours left on every account
 
 Accounts live in ~/.config/kaggle-accounts/<name>/ (override with KGS_HOME).
 EOF
@@ -166,6 +168,7 @@ cmd_env() {
   else
     require_account "$name"
     printf '%s\n' "$name" > "$CURRENT_FILE"
+    warn_stray_token "$name"
   fi
   local dir="$KGS_HOME/$name"
   # KAGGLE_USERNAME/KAGGLE_KEY override kaggle.json, so clear them.
@@ -190,14 +193,61 @@ cmd_run() {
   shift
   [ "${1:-}" = "--" ] && shift
   [ $# -gt 0 ] || die "usage: kgs run <name> [--] <command...>"
-  local dir="$KGS_HOME/$name"
+  warn_stray_token "$name"
+  account_env "$name"
+  exec "$@"
+}
+
+# kagglesdk reads ~/.kaggle/access_token before any kaggle.json, so a stray
+# token there silently replaces every kaggle.json account.
+warn_stray_token() {
+  [ -f "$KGS_HOME/$1/kaggle.json" ] && [ -f "$HOME/.kaggle/access_token" ] || return 0
+  info "kgs: warning: ~/.kaggle/access_token overrides account '$1'; move it away to use this account."
+}
+
+# Point the kaggle CLI at an account inside the current (sub)shell.
+account_env() {
+  local dir="$KGS_HOME/$1"
   unset KAGGLE_USERNAME KAGGLE_KEY KAGGLE_API_TOKEN
   export KAGGLE_CONFIG_DIR="$dir"
   if [ -f "$dir/access_token" ]; then
     KAGGLE_API_TOKEN="$(cat "$dir/access_token")"
     export KAGGLE_API_TOKEN
   fi
-  exec "$@"
+}
+
+cmd_quota() {
+  command -v kaggle >/dev/null 2>&1 || die "kaggle CLI not found (pip install kaggle)"
+  local names="" name dir out line current
+  if [ $# -gt 0 ]; then
+    for name in "$@"; do require_account "$name"; done
+    names="$*"
+  else
+    [ -d "$KGS_HOME" ] || die "no accounts yet (see 'kgs add')"
+    for dir in "$KGS_HOME"/*/; do
+      [ -d "$dir" ] && names="$names $(basename "$dir")"
+    done
+    [ -n "$names" ] || die "no accounts yet (see 'kgs add')"
+  fi
+  current="$(current_account || true)"
+  # An empty HOME stops ~/.kaggle/access_token from overriding kaggle.json accounts.
+  local empty_home
+  empty_home="$(mktemp -d)"
+  trap "rm -rf '$empty_home'" EXIT
+
+  printf '  %-20s %-9s %-9s %-9s %s\n' ACCOUNT LEFT USED TOTAL RESETS
+  for name in $names; do
+    # 'kaggle quota -v' prints CSV: resource,used,remaining,total,refreshAt
+    if out="$( (account_env "$name"; HOME="$empty_home" kaggle quota -v) 2>&1 )" \
+        && line="$(printf '%s\n' "$out" | grep '^GPU,' | tr -d '\r')"; then
+      printf '%s\n' "$line" | awk -F, -v n="$name" -v m="$([ "$name" = "$current" ] && echo '*' || echo ' ')" \
+        '{ t=$5; sub(/T/, " ", t); sub(/:[0-9][0-9]$/, "", t)
+           printf "%s %-20s %-9s %-9s %-9s %s UTC\n", m, n, $3, $2, $4, t }'
+    else
+      out="$(printf '%s\n' "$out" | tail -n 1)"
+      printf '  %-20s error: %s\n' "$name" "${out:-no GPU quota returned}"
+    fi
+  done
 }
 
 cmd_current() {
@@ -252,6 +302,7 @@ main() {
     use) cmd_use "$@" ;;
     run) cmd_run "$@" ;;
     current) cmd_current ;;
+    quota) cmd_quota "$@" ;;
     remove|rm) cmd_remove "$@" ;;
     shell-init) cmd_shell_init ;;
     _env) cmd_env "$@" ;;
