@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-KGS_VERSION="0.1.0"
+KGS_VERSION="0.2.0"
 KGS_HOME="${KGS_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/kaggle-accounts}"
 CURRENT_FILE="$KGS_HOME/.current"
 
